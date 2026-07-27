@@ -4,6 +4,28 @@
     "slug": "physio-admin",
     "version": "1.0.0",
     "orientation": "portrait",
-    "android": { "package": "com.tricityphysiohub.admin", "versionCode": 1 }
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#1a365d",
+      "resizeMode": "contain"
+    },
+    "android": {
+      "package": "com.tricityphysiohub.admin",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a365d"
+      },
+      "intentFilters": [],
+      "permissions": ["INTERNET", "VIBRATE", "RECEIVE_BOOT_COMPLETED", "POST_NOTIFICATIONS"]
+    },
+    "plugins": [
+      ["expo-notifications", { "color": "#1a365d" }],
+      ["expo-secure-store"]
+    ],
+    "extra": {
+      "apiUrl": "https://tricityphysiohub.in"
+    }
   }
 }
