@@ -25,13 +25,14 @@ export default function App() {
       setReady(true);
     })();
 
-    // Request notification permission (required for Android 13+)
-    Notifications.requestPermissionsAsync();
-
-    // Register push token
+    // Register push token — request once only if not already granted
     (async () => {
       try {
-        const { status } = await Notifications.getPermissionsAsync();
+        let { status } = await Notifications.getPermissionsAsync();
+        if (status !== 'granted') {
+          const result = await Notifications.requestPermissionsAsync();
+          status = result.status;
+        }
         if (status === 'granted') {
           const token = await Notifications.getExpoPushTokenAsync({ projectId: '8e57bbf8-0538-43b0-864b-4fe93bab8d46' });
           await fetch(API + '/api/register-push', {
