@@ -1,0 +1,9 @@
+{
+  "expo": {
+    "name": "PhysioHub Admin",
+    "slug": "physio-admin",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "android": { "package": "com.tricityphysiohub.admin", "versionCode": 1 }
+  }
+}
