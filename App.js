@@ -4,11 +4,17 @@ import { WebView } from 'react-native-webview';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 
+// Foreground notification handler — shows alert, plays sound, sets badge
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: true }),
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
 });
 
 const API = 'https://tricityphysiohub.in';
+const CHANNEL_ID = 'appointments';
 
 export default function App() {
   const webRef = useRef(null);
@@ -21,11 +27,25 @@ export default function App() {
       try {
         const p = await SecureStore.getItemAsync('admin_pass');
         if (p) setPass(p);
-      } catch (e) {}
+      } catch {
+        // use default password
+      }
       setReady(true);
     })();
 
-    // Register push token — request once only if not already granted
+    // ── Android notification channel (REQUIRED for Android 8+) ──
+    // Without HIGH importance, Android silently drops all notifications.
+    if (Platform.OS === 'android') {
+      Notifications.setNotificationChannelAsync(CHANNEL_ID, {
+        name: 'Appointment Alerts',
+        importance: Notifications.AndroidImportance.HIGH,
+        vibrationPattern: [0, 200, 100, 200],
+        lightColor: '#1a365d',
+        sound: 'default',
+      }).catch(() => {});
+    }
+
+    // ── Register push token (Expo Push → FCM → device) ──
     (async () => {
       try {
         let { status } = await Notifications.getPermissionsAsync();
@@ -34,16 +54,23 @@ export default function App() {
           status = result.status;
         }
         if (status === 'granted') {
-          const token = await Notifications.getExpoPushTokenAsync({ projectId: '8e57bbf8-0538-43b0-864b-4fe93bab8d46' });
+          const token = await Notifications.getExpoPushTokenAsync({
+            projectId: '8e57bbf8-0538-43b0-864b-4fe93bab8d46',
+          });
           await fetch(API + '/api/register-push', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ token: token.data, platform: Platform.OS }),
           });
         }
-      } catch (e) {}
+      } catch {
+        // Push registration is non-critical
+      }
     })();
 
-    // Poll for new appointments
+    // ── Poll for new appointments every 10s (foreground only) ──
+    // Android freezes JS timers when app is backgrounded.
+    // For background delivery, backend must send push via Expo Push API.
     const timer = setInterval(async () => {
       try {
         const r = await fetch(API + '/api/appointments');
@@ -53,26 +80,44 @@ export default function App() {
             const a = d.appointments[0];
             Vibration.vibrate([0, 200, 100, 200]);
             await Notifications.scheduleNotificationAsync({
-              content: { title: 'New Appointment!', body: a.name + ' - ' + a.location },
+              content: {
+                title: 'New Appointment!',
+                body: a.name + ' - ' + a.location,
+                data: { screen: 'admin' },
+                // Link to HIGH importance channel so Android shows it
+                ...(Platform.OS === 'android' ? { channelId: CHANNEL_ID } : {}),
+              },
               trigger: null,
             });
           }
           lastCount.current = d.appointments.length;
         }
-      } catch (e) {}
+      } catch {
+        // Poll error — next tick
+      }
     }, 10000);
 
-    // Show background permission hint (Android)
+    // ── Background permission hint (once per device) ──
     if (Platform.OS === 'android') {
-      setTimeout(() => {
-        Alert.alert(
-          'Background Alerts',
-          'To receive appointment alerts when app is closed:\n\n' +
-          'Go to: Settings → Apps → PhysioHub Admin → Battery → "Unrestricted"\n\n' +
-          'This allows notifications even when the app is in background.',
-          [{ text: 'OK', style: 'default' }]
-        );
-      }, 3000);
+      SecureStore.getItemAsync('bg_hint_shown').then((shown) => {
+        if (!shown) {
+          setTimeout(() => {
+            Alert.alert(
+              'Background Alerts',
+              'To get appointment alerts when app is closed:\n\n' +
+              'Settings → Apps → PhysioHub Admin → Battery → "Unrestricted"\n\n' +
+              'This lets notifications reach you even in background.',
+              [
+                {
+                  text: 'Got it',
+                  style: 'default',
+                  onPress: () => SecureStore.setItemAsync('bg_hint_shown', '1'),
+                },
+              ]
+            );
+          }, 3000);
+        }
+      });
     }
 
     return () => clearInterval(timer);
@@ -86,7 +131,9 @@ export default function App() {
         await SecureStore.setItemAsync('admin_pass', data.password);
         setPass(data.password);
       }
-    } catch (e) {}
+    } catch {
+      // ignore
+    }
   };
 
   // Auto-login script injected into WebView
@@ -125,11 +172,13 @@ export default function App() {
     })();
   `;
 
-  if (!ready) return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#1a365d' }}>
-      <StatusBar barStyle="light-content" backgroundColor="#1a365d" />
-    </SafeAreaView>
-  );
+  if (!ready) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#1a365d' }}>
+        <StatusBar barStyle="light-content" backgroundColor="#1a365d" />
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: '#1a365d' }}>
