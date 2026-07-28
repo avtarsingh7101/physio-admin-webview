@@ -1,10 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { SafeAreaView, StatusBar, Vibration, Platform, Alert } from 'react-native';
+import {
+  SafeAreaView,
+  StatusBar,
+  Vibration,
+  Platform,
+  Alert,
+  Linking,
+} from 'react-native';
 import { WebView } from 'react-native-webview';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
+import * as TaskManager from 'expo-task-manager';
+import * as BackgroundFetch from 'expo-background-fetch';
 
-// Foreground notification handler — shows alert, plays sound, sets badge
+// ── Foreground handler ──
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -15,10 +24,56 @@ Notifications.setNotificationHandler({
 
 const API = 'https://tricityphysiohub.in';
 const CHANNEL_ID = 'appointments';
+const BG_TASK = 'physio-admin-bg-poll';
+const SS_LAST_ID = 'last_appointment_id';
+
+// ── Background fetch task ──
+// Runs every ~15min (Android minimum) even when app is killed/swiped away.
+// Shares state with foreground via SecureStore so no double-notifications.
+TaskManager.defineTask(BG_TASK, async () => {
+  try {
+    const r = await fetch(API + '/api/appointments');
+    const d = await r.json();
+    if (!d.success || !d.appointments || d.appointments.length === 0) {
+      return BackgroundFetch.BackgroundFetchResult.NoData;
+    }
+
+    const latest = d.appointments[0];
+    const lastId = await SecureStore.getItemAsync(SS_LAST_ID);
+
+    // First run — just store the ID, don't notify
+    if (!lastId) {
+      await SecureStore.setItemAsync(SS_LAST_ID, String(latest.id || latest.name));
+      return BackgroundFetch.BackgroundFetchResult.NoData;
+    }
+
+    const currentId = String(latest.id || latest.name);
+    if (currentId !== lastId) {
+      // New appointment found
+      await SecureStore.setItemAsync(SS_LAST_ID, currentId);
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'New Appointment!',
+          body: latest.name + ' - ' + (latest.location || 'Clinic'),
+          data: { screen: 'admin', appointmentId: latest.id },
+          ...(Platform.OS === 'android' ? { channelId: CHANNEL_ID } : {}),
+        },
+        trigger: null,
+      });
+
+      return BackgroundFetch.BackgroundFetchResult.NewData;
+    }
+
+    return BackgroundFetch.BackgroundFetchResult.NoData;
+  } catch {
+    return BackgroundFetch.BackgroundFetchResult.Failed;
+  }
+});
 
 export default function App() {
   const webRef = useRef(null);
-  const lastCount = useRef(0);
+  const lastIdRef = useRef(null);
   const [pass, setPass] = useState('131313');
   const [ready, setReady] = useState(false);
 
@@ -28,24 +83,27 @@ export default function App() {
         const p = await SecureStore.getItemAsync('admin_pass');
         if (p) setPass(p);
       } catch {
-        // use default password
+        // use default
       }
       setReady(true);
     })();
 
-    // ── Android notification channel (REQUIRED for Android 8+) ──
-    // Without HIGH importance, Android silently drops all notifications.
+    // ── Android notification channel (Android 8+ MANDATORY) ──
     if (Platform.OS === 'android') {
       Notifications.setNotificationChannelAsync(CHANNEL_ID, {
         name: 'Appointment Alerts',
+        description: 'New patient appointment notifications',
         importance: Notifications.AndroidImportance.HIGH,
         vibrationPattern: [0, 200, 100, 200],
         lightColor: '#1a365d',
         sound: 'default',
+        // Show on lock screen + heads-up popup
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        bypassDnd: false,
       }).catch(() => {});
     }
 
-    // ── Register push token (Expo Push → FCM → device) ──
+    // ── Register push token ──
     (async () => {
       try {
         let { status } = await Notifications.getPermissionsAsync();
@@ -64,66 +122,125 @@ export default function App() {
           });
         }
       } catch {
-        // Push registration is non-critical
+        // non-critical
       }
     })();
 
-    // ── Poll for new appointments every 10s (foreground only) ──
-    // Android freezes JS timers when app is backgrounded.
-    // For background delivery, backend must send push via Expo Push API.
+    // ── Seed SecureStore with current count on first launch ──
+    (async () => {
+      try {
+        const r = await fetch(API + '/api/appointments');
+        const d = await r.json();
+        if (d.success && d.appointments && d.appointments.length > 0) {
+          const latest = d.appointments[0];
+          const stored = await SecureStore.getItemAsync(SS_LAST_ID);
+          if (!stored) {
+            await SecureStore.setItemAsync(
+              SS_LAST_ID,
+              String(latest.id || latest.name),
+            );
+          }
+          lastIdRef.current = stored || String(latest.id || latest.name);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+
+    // ── Register background fetch ──
+    BackgroundFetch.registerTaskAsync(BG_TASK, {
+      minimumInterval: 15 * 60, // 15 min (Android floor)
+      stopOnTerminate: false,
+      startOnBoot: true,
+    }).catch(() => {});
+
+    // ── Foreground polling every 10s ──
     const timer = setInterval(async () => {
       try {
         const r = await fetch(API + '/api/appointments');
         const d = await r.json();
-        if (d.success && d.appointments) {
-          if (lastCount.current > 0 && d.appointments.length > lastCount.current) {
-            const a = d.appointments[0];
+        if (!d.success || !d.appointments) return;
+
+        if (d.appointments.length > 0) {
+          const latest = d.appointments[0];
+          const currentId = String(latest.id || latest.name);
+
+          // First poll — init ref
+          if (!lastIdRef.current) {
+            lastIdRef.current = currentId;
+            return;
+          }
+
+          if (currentId !== lastIdRef.current) {
+            lastIdRef.current = currentId;
+            await SecureStore.setItemAsync(SS_LAST_ID, currentId);
+
             Vibration.vibrate([0, 200, 100, 200]);
             await Notifications.scheduleNotificationAsync({
               content: {
                 title: 'New Appointment!',
-                body: a.name + ' - ' + a.location,
-                data: { screen: 'admin' },
-                // Link to HIGH importance channel so Android shows it
-                ...(Platform.OS === 'android' ? { channelId: CHANNEL_ID } : {}),
+                body: latest.name + ' - ' + (latest.location || 'Clinic'),
+                data: { screen: 'admin', appointmentId: latest.id },
+                ...(Platform.OS === 'android'
+                  ? { channelId: CHANNEL_ID }
+                  : {}),
               },
               trigger: null,
             });
           }
-          lastCount.current = d.appointments.length;
         }
       } catch {
-        // Poll error — next tick
+        // next tick
       }
     }, 10000);
 
-    // ── Background permission hint (once per device) ──
+    // ── MIUI / Redmi permission guide (once per device) ──
     if (Platform.OS === 'android') {
-      SecureStore.getItemAsync('bg_hint_shown').then((shown) => {
+      SecureStore.getItemAsync('miui_guide_shown').then((shown) => {
         if (!shown) {
           setTimeout(() => {
             Alert.alert(
-              'Background Alerts',
-              'To get appointment alerts when app is closed:\n\n' +
-              'Settings → Apps → PhysioHub Admin → Battery → "Unrestricted"\n\n' +
-              'This lets notifications reach you even in background.',
+              '📱 Redmi / MIUI Setup',
+              'For reliable background notifications on Redmi phones:\n\n' +
+              '1️⃣  Autostart\n' +
+              '   Settings → Apps → Manage apps\n' +
+              '   → PhysioHub Admin → Autostart → ON\n\n' +
+              '2️⃣  Battery\n' +
+              '   Settings → Apps → Manage apps\n' +
+              '   → PhysioHub Admin → Battery saver\n' +
+              '   → No restrictions\n\n' +
+              '3️⃣  Lock in Recents\n' +
+              '   Open recent apps (swipe up/hold ☰)\n' +
+              '   → Tap & hold PhysioHub Admin card\n' +
+              '   → 🔒 Lock icon\n\n' +
+              '4️⃣  Notifications\n' +
+              '   Settings → Notifications → App notifications\n' +
+              '   → PhysioHub Admin → Allow all\n\n' +
+              'Open Settings now?',
               [
+                { text: 'Later', style: 'cancel' },
                 {
-                  text: 'Got it',
-                  style: 'default',
-                  onPress: () => SecureStore.setItemAsync('bg_hint_shown', '1'),
+                  text: 'Open Settings',
+                  onPress: () => {
+                    Linking.openSettings();
+                    SecureStore.setItemAsync('miui_guide_shown', '1');
+                  },
                 },
-              ]
+              ],
             );
-          }, 3000);
+            SecureStore.setItemAsync('miui_guide_shown', '1');
+          }, 4000);
         }
       });
     }
 
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      BackgroundFetch.unregisterTaskAsync(BG_TASK).catch(() => {});
+    };
   }, []);
 
-  // Handle messages from WebView (password save)
+  // WebView message handler (password save)
   const handleMessage = async (msg) => {
     try {
       const data = JSON.parse(msg.nativeEvent.data);
@@ -136,7 +253,7 @@ export default function App() {
     }
   };
 
-  // Auto-login script injected into WebView
+  // Auto-login script
   const autoLoginJS = `
     (function() {
       var check = setInterval(function() {
@@ -155,7 +272,6 @@ export default function App() {
           if (p && b) { p.value = '${pass}'; b.click(); }
         }, 300);
       });
-      // Save password on change
       var orig = window.fetch;
       window.fetch = function(u, o) {
         return orig.apply(this, arguments).then(function(r) {
